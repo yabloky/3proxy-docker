@@ -22,13 +22,15 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 numeric tags from Docker Hub
+      - name: Get last 2 real numeric tags from Docker Hub
         id: tags
         run: |
           KEEP=${{ env.KEEP }}
+          # Забираем теги, исключаем алиасы (типа 1.12), оставляем только реальные
           VERSIONS=$(curl -fsSL "https://hub.docker.com/v2/repositories/${SOURCE_REPO}/tags/?page_size=100" \
             | jq --argjson k "$KEEP" -r '[ .results[].name
                         | select(test("^[0-9]+\\.[0-9]+(\\.[0-9]+)?$")) ]
+                      | unique
                       | sort_by([ split(".")[] | tonumber ])
                       | reverse
                       | .[:$k][]')
@@ -57,7 +59,7 @@ jobs:
           echo "Mirroring versions from upstream:"
           echo "$VERSIONS"
 
-          # 1. Всегда подтягиваем обе версии с Docker Hub и пушим на GHCR
+          # 1. Синхронизация 2 последних версий
           while read -r VER; do
             [ -z "$VER" ] && continue
             echo "→ Sync ${VER}"
@@ -66,7 +68,7 @@ jobs:
             docker push "${TARGET}:${VER}"
           done <<< "$VERSIONS"
 
-          # 2. Удаляем с GHCR всё, что не входит в эти версии
+          # 2. Удаляем с GHCR всё, чего нет в апстриме
           ALL_IDS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions | jq -r '.[].id')
           for ID in $ALL_IDS; do
             TAGS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/$ID | jq -r '.metadata.container.tags[]?' || true)
@@ -80,7 +82,7 @@ jobs:
             fi
           done
 
-          # 3. Перетегируем latest на самую новую версию
+          # 3. Перетегируем latest
           LATEST=$(echo "$VERSIONS" | head -n1)
           echo "→ Updating latest -> ${LATEST}"
           docker pull "${SOURCE}:${LATEST}"
