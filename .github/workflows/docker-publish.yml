@@ -1,4 +1,4 @@
-name: Mirror 3proxy images to GHCR (2 latest)
+name: Mirror 3proxy images to GHCR
 
 on:
   push:
