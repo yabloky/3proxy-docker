@@ -1,4 +1,3 @@
-```yaml
 name: Mirror 3proxy images to GHCR
 
 on:
@@ -17,34 +16,32 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Install jq + gh
+      - name: Install jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 semver tags from Docker Hub (X.Y.Z)
+      - name: Get last 2 numeric tags from Docker Hub
         id: versions
         run: |
           VERSIONS=$(curl -fsSL "https://hub.docker.com/v2/repositories/${SOURCE_REPO}/tags/?page_size=100" \
             | jq -r '[ .results[].name
-                        | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) ]
+                        | select(test("^[0-9]+(\\.[0-9]+)*$")) ]
                       | sort_by([ split(".")[] | tonumber ])
                       | reverse
                       | .[0:2][]')
           echo "versions<<EOF" >> "$GITHUB_OUTPUT"
           printf "%s\n" "$VERSIONS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "Top versions:"
-          printf "%s\n" "$VERSIONS"
 
-      - name: Login to GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror two versions
+      - name: Mirror last 2 versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -52,90 +49,33 @@ jobs:
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
 
-          TOP=$(echo "${{ steps.versions.outputs.versions }}" | sed -n '1p')
-          SECOND=$(echo "${{ steps.versions.outputs.versions }}" | sed -n '2p')
+          LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
 
-          mirror_tag () {
-            T="$1"
-            [ -z "$T" ] && return 0
-            docker pull "${SOURCE}:$T"
-            docker tag  "${SOURCE}:$T" "${TARGET}:$T"
-            docker push "${TARGET}:$T"
-          }
+          while read -r VER; do
+            [ -z "$VER" ] && continue
+            echo "$LOCAL" | grep -q "^${VER}$" && continue
+            docker pull "${SOURCE}:${VER}"
+            docker tag  "${SOURCE}:${VER}" "${TARGET}:${VER}"
+            docker push "${TARGET}:${VER}"
+          done <<< "${{ steps.versions.outputs.versions }}"
 
-          mirror_tag "$TOP"
-          mirror_tag "$SECOND"
+          LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
+          CNT=$(echo "$LOCAL" | wc -l)
+          if [ "$CNT" -gt "${KEEP}" ]; then
+            DEL=$(echo "$LOCAL" | tail -n +$((KEEP+1)))
+            for OLD in $DEL; do
+              ID=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
+                | jq -r ".[] | select(.metadata.container.tags[0]==\"${OLD}\") | .id")
+              gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/${ID}
+            done
+          fi
 
-          docker tag  "${TARGET}:$TOP" "${TARGET}:latest"
+      - name: Update latest
+        run: |
+          TARGET="${{ env.TARGET_REPO }}"
+          SOURCE="${{ env.SOURCE_REPO }}"
+          docker pull "${SOURCE}:latest"
+          docker tag  "${SOURCE}:latest" "${TARGET}:latest"
           docker push "${TARGET}:latest"
-
-      - name: Enforce clean tags (keep only X.Y.Z + latest)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          TARGET="${{ env.TARGET_REPO }}"
-          SOURCE="${{ env.SOURCE_REPO }}"
-
-          TOP=$(echo "${{ steps.versions.outputs.versions }}" | sed -n '1p')
-          SECOND=$(echo "${{ steps.versions.outputs.versions }}" | sed -n '2p')
-
-          ALLOWED_TOP="$TOP latest"
-          ALLOWED_SECOND="$SECOND"
-
-          list_versions () {
-            gh api -H "Accept: application/vnd.github+json" \
-              /users/${{ github.actor }}/packages/container/3proxy/versions \
-              | jq -r '.[] | @base64'
-          }
-
-          b64jq () { echo "$1" | base64 -d | jq -r "$2"; }
-
-          for row in $(list_versions); do
-            ID=$(b64jq "$row" '.id')
-            TAGS=$(b64jq "$row" '.metadata.container.tags | map(select(. != null)) | join(" ")')
-
-            if echo "$TAGS" | grep -qw "$TOP"; then
-              SHOULD="$ALLOWED_TOP"
-              NEED_REBUILD=0
-              for t in $TAGS; do
-                echo "$SHOULD" | grep -qw "$t" || NEED_REBUILD=1
-              done
-              for t in $SHOULD; do
-                echo "$TAGS" | grep -qw "$t" || NEED_REBUILD=1
-              done
-              if [ "$NEED_REBUILD" -eq 1 ]; then
-                gh api --method DELETE -H "Accept: application/vnd.github+json" \
-                  /users/${{ github.actor }}/packages/container/3proxy/versions/$ID || true
-                docker pull "${SOURCE}:$TOP"
-                docker tag  "${SOURCE}:$TOP" "${TARGET}:$TOP"
-                docker push "${TARGET}:$TOP"
-                docker tag  "${TARGET}:$TOP" "${TARGET}:latest"
-                docker push "${TARGET}:latest"
-              fi
-              continue
-            fi
-
-            if [ -n "$SECOND" ] && echo "$TAGS" | grep -qw "$SECOND"; then
-              SHOULD="$ALLOWED_SECOND"
-              NEED_REBUILD=0
-              for t in $TAGS; do
-                echo "$SHOULD" | grep -qw "$t" || NEED_REBUILD=1
-              done
-              for t in $SHOULD; do
-                echo "$TAGS" | grep -qw "$t" || NEED_REBUILD=1
-              done
-              if [ "$NEED_REBUILD" -eq 1 ]; then
-                gh api --method DELETE -H "Accept: application/vnd.github+json" \
-                  /users/${{ github.actor }}/packages/container/3proxy/versions/$ID || true
-                docker pull "${SOURCE}:$SECOND"
-                docker tag  "${SOURCE}:$SECOND" "${TARGET}:$SECOND"
-                docker push "${TARGET}:$SECOND"
-              fi
-              continue
-            fi
-
-            gh api --method DELETE -H "Accept: application/vnd.github+json" \
-              /users/${{ github.actor }}/packages/container/3proxy/versions/$ID || true
-          done
-```
