@@ -26,10 +26,10 @@ jobs:
         id: tags
         run: |
           KEEP=${{ env.KEEP }}
-          # Забираем теги, исключаем алиасы (типа 1.12), оставляем только реальные
           VERSIONS=$(curl -fsSL "https://hub.docker.com/v2/repositories/${SOURCE_REPO}/tags/?page_size=100" \
             | jq --argjson k "$KEEP" -r '[ .results[].name
                         | select(test("^[0-9]+\\.[0-9]+(\\.[0-9]+)?$")) ]
+                      | map( if test("^[0-9]+\\.[0-9]+$") then . + ".0" else . end )
                       | unique
                       | sort_by([ split(".")[] | tonumber ])
                       | reverse
@@ -39,6 +39,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
           echo "Found versions:"
           echo "$VERSIONS"
+
 
       - name: Login to GHCR
         uses: docker/login-action@v3
