@@ -1,4 +1,4 @@
-name: Mirror 3proxy images to GHCR
+name: Mirror 3proxy images to GHCR (2 latest)
 
 on:
   push:
@@ -8,13 +8,14 @@ on:
 env:
   SOURCE_REPO: tarampampam/3proxy
   TARGET_REPO: ghcr.io/yabloky/3proxy
-  KEEP: "2"
+  KEEP: 2
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+
     steps:
       - name: Install jq
         run: |
@@ -22,20 +23,22 @@ jobs:
           sudo apt-get install -y jq gh
 
       - name: Get last 2 numeric tags from Docker Hub
-        id: versions
+        id: tags
         run: |
           VERSIONS=$(curl -fsSL "https://hub.docker.com/v2/repositories/${SOURCE_REPO}/tags/?page_size=100" \
             | jq -r '[ .results[].name
                         | select(test("^[0-9]+(\\.[0-9]+)*$")) ]
                       | sort_by([ split(".")[] | tonumber ])
                       | reverse
-                      | .[0:2][]')
+                      | .[0:${KEEP}][]')
           echo "versions<<EOF" >> "$GITHUB_OUTPUT"
-          printf "%s\n" "$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "$VERSIONS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Found versions:"
+          echo "$VERSIONS"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v2
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -48,34 +51,45 @@ jobs:
           set -e
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
+          KEEP=${{ env.KEEP }}
+          VERSIONS="${{ steps.tags.outputs.versions }}"
+
+          echo "Mirroring versions:"
+          echo "$VERSIONS"
 
           LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
             | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
 
+          # Добавляем новые
           while read -r VER; do
             [ -z "$VER" ] && continue
-            echo "$LOCAL" | grep -q "^${VER}$" && continue
+            if echo "$LOCAL" | grep -q "^${VER}$"; then
+              echo "Already have ${VER}, skip"
+              continue
+            fi
+            echo "→ Pull/push ${VER}"
             docker pull "${SOURCE}:${VER}"
             docker tag  "${SOURCE}:${VER}" "${TARGET}:${VER}"
             docker push "${TARGET}:${VER}"
-          done <<< "${{ steps.versions.outputs.versions }}"
+          done <<< "$VERSIONS"
 
+          # Очищаем старые, оставляем только 2
           LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
             | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
           CNT=$(echo "$LOCAL" | wc -l)
-          if [ "$CNT" -gt "${KEEP}" ]; then
+          if [ "$CNT" -gt "$KEEP" ]; then
             DEL=$(echo "$LOCAL" | tail -n +$((KEEP+1)))
             for OLD in $DEL; do
               ID=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
                 | jq -r ".[] | select(.metadata.container.tags[0]==\"${OLD}\") | .id")
+              echo "Deleting old ${OLD}"
               gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/${ID}
             done
           fi
 
-      - name: Update latest
-        run: |
-          TARGET="${{ env.TARGET_REPO }}"
-          SOURCE="${{ env.SOURCE_REPO }}"
-          docker pull "${SOURCE}:latest"
-          docker tag  "${SOURCE}:latest" "${TARGET}:latest"
+          # Перетегируем latest на самую новую
+          LATEST=$(echo "$VERSIONS" | head -n1)
+          echo "→ Updating latest -> ${LATEST}"
+          docker pull "${SOURCE}:${LATEST}"
+          docker tag  "${SOURCE}:${LATEST}" "${TARGET}:latest"
           docker push "${TARGET}:latest"
