@@ -20,14 +20,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 stable versions
+      - name: Get last 2 stable versions (from tags)
         id: versions
         run: |
-          VERSIONS=$(curl -s https://api.github.com/repos/tarampampam/3proxy/releases \
-            | jq -r '[ .[] 
-                | select(.tag_name 
-                  | test("^[vV]?[0-9]+(\\.[0-9]+)*$")) ][0:2] 
-                | .[].tag_name' \
+          VERSIONS=$(curl -s https://api.github.com/repos/tarampampam/3proxy/tags \
+            | jq -r '[ .[].name
+                      | select(test("^[vV]?[0-9]+(\\.[0-9]+)*$")) ][0:2][]' \
             | sed 's/^v//')
           echo "versions<<EOF" >> $GITHUB_OUTPUT
           echo "$VERSIONS" >> $GITHUB_OUTPUT
@@ -47,15 +45,17 @@ jobs:
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
 
+          # локальные теги без latest/null/пустых
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null' | sort -Vr || true)
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
           echo "Local versions:"
           echo "$LOCAL_VERSIONS"
 
+          # добавить только недостающие
           while read -r VERSION; do
             [ -z "$VERSION" ] && continue
             if echo "$LOCAL_VERSIONS" | grep -q "^$VERSION$"; then
-              echo "Already have $VERSION, skipping pull/push"
+              echo "Already have $VERSION, skipping"
               continue
             fi
             echo "-----> New version detected: $VERSION"
@@ -64,8 +64,9 @@ jobs:
             docker push "${TARGET}:$VERSION"
           done <<< "${{ steps.versions.outputs.versions }}"
 
+          # оставить только 2 последних
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null' | sort -Vr || true)
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
           COUNT=$(echo "$LOCAL_VERSIONS" | wc -l)
           if [ "$COUNT" -gt 2 ]; then
             OLDEST=$(echo "$LOCAL_VERSIONS" | tail -n +3)
@@ -77,11 +78,13 @@ jobs:
             done
           fi
 
+          # latest -> самая свежая
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
           if ! docker image inspect "${TARGET}:$LATEST" >/dev/null 2>&1; then
-            echo "TARGET:$LATEST not local, pulling from registry"
-            docker pull "${TARGET}:$LATEST" || docker pull "${SOURCE}:$LATEST"
-            docker tag "${SOURCE}:$LATEST" "${TARGET}:$LATEST" 2>/dev/null || true
+            echo "Pulling ${SOURCE}:$LATEST for latest tag"
+            docker pull "${SOURCE}:$LATEST"
+            docker tag "${SOURCE}:$LATEST" "${TARGET}:$LATEST"
+            docker push "${TARGET}:$LATEST"
           fi
           docker tag "${TARGET}:$LATEST" "${TARGET}:latest"
           docker push "${TARGET}:latest"
