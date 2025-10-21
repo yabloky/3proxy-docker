@@ -55,40 +55,33 @@ jobs:
           KEEP=${{ env.KEEP }}
           VERSIONS="${{ steps.tags.outputs.versions }}"
 
-          echo "Mirroring versions:"
+          echo "Mirroring versions from upstream:"
           echo "$VERSIONS"
 
-          LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
-
-          # Добавляем новые
+          # 1. Всегда подтягиваем обе версии с Docker Hub и пушим на GHCR
           while read -r VER; do
             [ -z "$VER" ] && continue
-            if echo "$LOCAL" | grep -q "^${VER}$"; then
-              echo "Already have ${VER}, skip"
-              continue
-            fi
-            echo "→ Pull/push ${VER}"
+            echo "→ Sync ${VER}"
             docker pull "${SOURCE}:${VER}"
             docker tag  "${SOURCE}:${VER}" "${TARGET}:${VER}"
             docker push "${TARGET}:${VER}"
           done <<< "$VERSIONS"
 
-          # Очищаем старые, оставляем только 2
-          LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
-          CNT=$(echo "$LOCAL" | wc -l)
-          if [ "$CNT" -gt "$KEEP" ]; then
-            DEL=$(echo "$LOCAL" | tail -n +$((KEEP+1)))
-            for OLD in $DEL; do
-              ID=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-                | jq -r ".[] | select(.metadata.container.tags[0]==\"${OLD}\") | .id")
-              echo "Deleting old ${OLD}"
-              gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/${ID}
+          # 2. Удаляем с GHCR всё, что не входит в эти версии
+          ALL_IDS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions | jq -r '.[].id')
+          for ID in $ALL_IDS; do
+            TAGS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/$ID | jq -r '.metadata.container.tags[]?' || true)
+            MATCH=false
+            for VER in $VERSIONS; do
+              echo "$TAGS" | grep -qx "$VER" && MATCH=true
             done
-          fi
+            if [ "$MATCH" = false ]; then
+              echo "Deleting old GHCR package version id=$ID (tags: $TAGS)"
+              gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/$ID
+            fi
+          done
 
-          # Перетегируем latest на самую новую
+          # 3. Перетегируем latest на самую новую версию
           LATEST=$(echo "$VERSIONS" | head -n1)
           echo "→ Updating latest -> ${LATEST}"
           docker pull "${SOURCE}:${LATEST}"
