@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  SOURCE_REPO: tarampampam/3proxy
   TARGET_REPO: ghcr.io/yabloky/3proxy
   KEEP: "2"
 
@@ -20,13 +21,15 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 stable releases (from 3proxy-docker)
+      - name: Get last 2 numeric tags from Docker Hub
         id: versions
         run: |
-          VERSIONS=$(curl -fsSL https://api.github.com/repos/tarampampam/3proxy-docker/releases \
-            | jq -r '[ .[] | (.tag_name // empty)
-                       | select(test("^[vV]?[0-9]+(\\.[0-9]+)*$")) ][0:2][]' \
-            | sed 's/^[vV]//')
+          VERSIONS=$(curl -fsSL "https://hub.docker.com/v2/repositories/${SOURCE_REPO}/tags/?page_size=100" \
+            | jq -r '[ .results[].name
+                        | select(test("^[0-9]+(\\.[0-9]+)*$")) ]
+                      | sort_by([ split(".")[] | tonumber ])
+                      | reverse
+                      | .[0:2][]')
           echo "versions<<EOF" >> "$GITHUB_OUTPUT"
           printf "%s\n" "$VERSIONS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -44,32 +47,17 @@ jobs:
         run: |
           set -e
           TARGET="${{ env.TARGET_REPO }}"
-          # источники: docker hub и два GHCR варианта
-          SRC1="docker.io/tarampampam/3proxy"
-          SRC2="ghcr.io/tarampampam/3proxy"
-          SRC3="ghcr.io/tarampampam/3proxy-docker"
+          SOURCE="${{ env.SOURCE_REPO }}"
 
           LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
             | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
 
-          pull_any() {
-            TAG="$1"
-            for IMG in "$SRC1" "$SRC2" "$SRC3"; do
-              if docker manifest inspect "${IMG}:${TAG}" >/dev/null 2>&1; then
-                docker pull "${IMG}:${TAG}"
-                docker tag  "${IMG}:${TAG}" "${TARGET}:${TAG}"
-                docker push "${TARGET}:${TAG}"
-                return 0
-              fi
-            done
-            echo "skip ${TAG}: not found upstream"
-            return 1
-          }
-
           while read -r VER; do
             [ -z "$VER" ] && continue
             echo "$LOCAL" | grep -q "^${VER}$" && continue
-            pull_any "$VER" || true
+            docker pull "${SOURCE}:${VER}"
+            docker tag  "${SOURCE}:${VER}" "${TARGET}:${VER}"
+            docker push "${TARGET}:${VER}"
           done <<< "${{ steps.versions.outputs.versions }}"
 
           LOCAL=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
@@ -84,9 +72,10 @@ jobs:
             done
           fi
 
-          LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
-          if [ -n "$LATEST" ]; then
-            docker image inspect "${TARGET}:${LATEST}" >/dev/null 2>&1 || pull_any "$LATEST"
-            docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
-            docker push "${TARGET}:latest"
-          fi
+      - name: Update latest
+        run: |
+          TARGET="${{ env.TARGET_REPO }}"
+          SOURCE="${{ env.SOURCE_REPO }}"
+          docker pull "${SOURCE}:latest"
+          docker tag  "${SOURCE}:latest" "${TARGET}:latest"
+          docker push "${TARGET}:latest"
