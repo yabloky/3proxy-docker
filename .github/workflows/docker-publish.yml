@@ -1,14 +1,11 @@
 name: Mirror 3proxy images to GHCR
-
 on:
   push:
     branches: [ master ]
   workflow_dispatch:
-
 env:
   SOURCE_REPO: tarampampam/3proxy
   TARGET_REPO: ghcr.io/yabloky/3proxy
-
 jobs:
   mirror:
     runs-on: ubuntu-latest
@@ -19,7 +16,6 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq gh
-
       - name: Get last 2 stable versions (from tags)
         id: versions
         run: |
@@ -32,61 +28,73 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           echo "Found stable versions:"
           echo "$VERSIONS"
-
       - name: Log in to GHCR
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Mirror last 2 versions
         run: |
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
-
-          # локальные теги без latest/null/пустых
-          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
+          
+          # получить локальные теги (если пакет существует)
+          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
+            /users/${{ github.actor }}/packages/container/3proxy/versions 2>/dev/null \
+            | jq -r '.[].metadata.container.tags[]?' 2>/dev/null \
+            | grep -v -E '^$|null|latest' | sort -Vru || echo "")
+          
           echo "Local versions:"
-          echo "$LOCAL_VERSIONS"
-
-          # добавить только недостающие
-          while read -r VERSION; do
-            [ -z "$VERSION" ] && continue
-            if echo "$LOCAL_VERSIONS" | grep -q "^$VERSION$"; then
+          echo "${LOCAL_VERSIONS:-none}"
+          
+          # мигрировать только недостающие
+          while IFS= read -r VERSION; do
+            # пропустить пустые строки
+            [[ -z "$VERSION" || "$VERSION" == "null" ]] && continue
+            
+            if echo "$LOCAL_VERSIONS" | grep -qx "$VERSION" 2>/dev/null; then
               echo "Already have $VERSION, skipping"
               continue
             fi
-            echo "-----> New version detected: $VERSION"
-            docker pull "${SOURCE}:$VERSION"
-            docker tag  "${SOURCE}:$VERSION" "${TARGET}:$VERSION"
-            docker push "${TARGET}:$VERSION"
+            
+            echo "-----> Mirroring new version: $VERSION"
+            docker pull "${SOURCE}:${VERSION}"
+            docker tag "${SOURCE}:${VERSION}" "${TARGET}:${VERSION}"
+            docker push "${TARGET}:${VERSION}"
           done <<< "${{ steps.versions.outputs.versions }}"
-
-          # оставить только 2 последних
-          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null|latest' | sort -Vr || true)
-          COUNT=$(echo "$LOCAL_VERSIONS" | wc -l)
+          
+          # удалить старые версии (оставить 2)
+          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
+            /users/${{ github.actor }}/packages/container/3proxy/versions 2>/dev/null \
+            | jq -r '.[].metadata.container.tags[]?' 2>/dev/null \
+            | grep -v -E '^$|null|latest' | sort -Vru || echo "")
+          
+          COUNT=$(echo "$LOCAL_VERSIONS" | grep -c . || echo 0)
           if [ "$COUNT" -gt 2 ]; then
+            echo "Cleaning up old versions (keeping 2 latest)"
             OLDEST=$(echo "$LOCAL_VERSIONS" | tail -n +3)
             for OLD in $OLDEST; do
+              [[ -z "$OLD" ]] && continue
               echo "Deleting old version: $OLD"
-              ID=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions \
-                | jq -r ".[] | select(.metadata.container.tags[0]==\"$OLD\") | .id")
-              gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/3proxy/versions/$ID
+              VERSION_ID=$(gh api -H "Accept: application/vnd.github+json" \
+                /users/${{ github.actor }}/packages/container/3proxy/versions \
+                | jq -r ".[] | select(.metadata.container.tags[]? == \"$OLD\") | .id" | head -n1)
+              
+              if [[ -n "$VERSION_ID" && "$VERSION_ID" != "null" ]]; then
+                gh api --method DELETE -H "Accept: application/vnd.github+json" \
+                  /users/${{ github.actor }}/packages/container/3proxy/versions/$VERSION_ID
+              fi
             done
           fi
-
-          # latest -> самая свежая
-          LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
-          if ! docker image inspect "${TARGET}:$LATEST" >/dev/null 2>&1; then
-            echo "Pulling ${SOURCE}:$LATEST for latest tag"
-            docker pull "${SOURCE}:$LATEST"
-            docker tag "${SOURCE}:$LATEST" "${TARGET}:$LATEST"
-            docker push "${TARGET}:$LATEST"
-          fi
-          docker tag "${TARGET}:$LATEST" "${TARGET}:latest"
+          
+          # обновить latest на самую свежую версию
+          LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
+          [[ -z "$LATEST" ]] && { echo "No versions found"; exit 1; }
+          
+          echo "Tagging ${LATEST} as latest"
+          docker pull "${SOURCE}:${LATEST}" 2>/dev/null || docker pull "${TARGET}:${LATEST}"
+          docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
           docker push "${TARGET}:latest"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
