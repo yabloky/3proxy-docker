@@ -31,7 +31,7 @@ jobs:
                         | select(test("^[0-9]+\\.[0-9]+(\\.[0-9]+)?$")) ]
                       | sort_by([ split(".")[] | tonumber ])
                       | reverse
-                      | .[:$k][]'
+                      | .[:$k][]')
           echo "versions<<EOF" >> "$GITHUB_OUTPUT"
           echo "$VERSIONS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -52,7 +52,6 @@ jobs:
           set -e
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
-          KEEP=${{ env.KEEP }}
           VERSIONS="${{ steps.tags.outputs.versions }}"
 
           echo "Mirroring versions from upstream:"
