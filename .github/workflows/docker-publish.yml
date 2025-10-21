@@ -43,17 +43,22 @@ jobs:
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
             /users/${{ github.actor }}/packages/container/3proxy/versions 2>/dev/null \
             | jq -r '.[].metadata.container.tags[]?' 2>/dev/null \
-            | grep -v -E '^$|null|latest' | sort -Vru || echo "")
+            | grep -v -E '^$|null|latest' | sort -Vru || true)
           
           echo "Local versions:"
-          echo "${LOCAL_VERSIONS:-none}"
+          if [ -z "$LOCAL_VERSIONS" ]; then
+            echo "none"
+          else
+            echo "$LOCAL_VERSIONS"
+          fi
           
           # мигрировать только недостающие
           while IFS= read -r VERSION; do
             # пропустить пустые строки
-            [[ -z "$VERSION" || "$VERSION" == "null" ]] && continue
+            [ -z "$VERSION" ] && continue
+            [[ "$VERSION" == "null" ]] && continue
             
-            if echo "$LOCAL_VERSIONS" | grep -qx "$VERSION" 2>/dev/null; then
+            if [ -n "$LOCAL_VERSIONS" ] && echo "$LOCAL_VERSIONS" | grep -qxF "$VERSION"; then
               echo "Already have $VERSION, skipping"
               continue
             fi
@@ -68,20 +73,25 @@ jobs:
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
             /users/${{ github.actor }}/packages/container/3proxy/versions 2>/dev/null \
             | jq -r '.[].metadata.container.tags[]?' 2>/dev/null \
-            | grep -v -E '^$|null|latest' | sort -Vru || echo "")
+            | grep -v -E '^$|null|latest' | sort -Vru || true)
           
-          COUNT=$(echo "$LOCAL_VERSIONS" | grep -c . || echo 0)
+          if [ -z "$LOCAL_VERSIONS" ]; then
+            COUNT=0
+          else
+            COUNT=$(echo "$LOCAL_VERSIONS" | wc -l)
+          fi
+          
           if [ "$COUNT" -gt 2 ]; then
             echo "Cleaning up old versions (keeping 2 latest)"
             OLDEST=$(echo "$LOCAL_VERSIONS" | tail -n +3)
             for OLD in $OLDEST; do
-              [[ -z "$OLD" ]] && continue
+              [ -z "$OLD" ] && continue
               echo "Deleting old version: $OLD"
               VERSION_ID=$(gh api -H "Accept: application/vnd.github+json" \
-                /users/${{ github.actor }}/packages/container/3proxy/versions \
+                /users/${{ github.actor }}/packages/container/3proxy/versions 2>/dev/null \
                 | jq -r ".[] | select(.metadata.container.tags[]? == \"$OLD\") | .id" | head -n1)
               
-              if [[ -n "$VERSION_ID" && "$VERSION_ID" != "null" ]]; then
+              if [ -n "$VERSION_ID" ] && [ "$VERSION_ID" != "null" ]; then
                 gh api --method DELETE -H "Accept: application/vnd.github+json" \
                   /users/${{ github.actor }}/packages/container/3proxy/versions/$VERSION_ID
               fi
@@ -90,10 +100,17 @@ jobs:
           
           # обновить latest на самую свежую версию
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n1)
-          [[ -z "$LATEST" ]] && { echo "No versions found"; exit 1; }
+          if [ -z "$LATEST" ]; then
+            echo "No versions found"
+            exit 1
+          fi
           
           echo "Tagging ${LATEST} as latest"
-          docker pull "${SOURCE}:${LATEST}" 2>/dev/null || docker pull "${TARGET}:${LATEST}"
+          if ! docker pull "${TARGET}:${LATEST}" 2>/dev/null; then
+            docker pull "${SOURCE}:${LATEST}"
+            docker tag "${SOURCE}:${LATEST}" "${TARGET}:${LATEST}"
+            docker push "${TARGET}:${LATEST}"
+          fi
           docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
           docker push "${TARGET}:latest"
         env:
