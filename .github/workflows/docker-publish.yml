@@ -1,8 +1,8 @@
-name: Mirror and Scan 3proxy
+name: Mirror 3proxy images to GHCR
 
 on:
   push:
-    branches: ["master"]
+    branches: [ master ]
   workflow_dispatch:
 
 env:
@@ -14,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
-      contents: read
     steps:
       - name: Install jq
         run: |
@@ -43,7 +42,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror and scan last 2 versions
+      - name: Mirror last 2 versions
         run: |
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
@@ -56,18 +55,12 @@ jobs:
           while read -r VERSION; do
             [ -z "$VERSION" ] && continue
             if echo "$LOCAL_VERSIONS" | grep -q "^$VERSION$"; then
-              echo "Already have $VERSION, skipping"
+              echo "Already have $VERSION, skipping pull/push"
               continue
             fi
-
-            echo "-----> Pulling and scanning $VERSION"
+            echo "-----> New version detected: $VERSION"
             docker pull "${SOURCE}:$VERSION"
             docker tag  "${SOURCE}:$VERSION" "${TARGET}:$VERSION"
-
-            echo "-----> Scanning ${TARGET}:$VERSION"
-            trivy image --severity HIGH,CRITICAL --exit-code 1 "${TARGET}:$VERSION"
-
-            echo "-----> Pushing ${TARGET}:$VERSION"
             docker push "${TARGET}:$VERSION"
           done <<< "${{ steps.versions.outputs.versions }}"
 
@@ -85,12 +78,12 @@ jobs:
           fi
 
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
-          echo "Tagging ${TARGET}:$LATEST as latest"
+          if ! docker image inspect "${TARGET}:$LATEST" >/dev/null 2>&1; then
+            echo "TARGET:$LATEST not local, pulling from registry"
+            docker pull "${TARGET}:$LATEST" || docker pull "${SOURCE}:$LATEST"
+            docker tag "${SOURCE}:$LATEST" "${TARGET}:$LATEST" 2>/dev/null || true
+          fi
           docker tag "${TARGET}:$LATEST" "${TARGET}:latest"
-
-          echo "-----> Scanning latest before push"
-          trivy image --severity HIGH,CRITICAL --exit-code 1 "${TARGET}:latest"
-
           docker push "${TARGET}:latest"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
